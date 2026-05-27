@@ -6,3 +6,7 @@ updates:
       interval: daily
     labels:
       - dependencies
+    ignore:
+      # docker/docker v28+ has a broken archive_deprecated.go; update containers first.
+      - dependency-name: "github.com/docker/docker"
+        update-types: ["version-update:semver-major"]
