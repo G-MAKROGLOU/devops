@@ -11,110 +11,86 @@ import (
 	"github.com/G-MAKROGLOU/containers"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/go-connections/nat"
 	"github.com/fatih/color"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+// Bug fix: rename embed FS vars so they don't shadow the local byte-slice
+// variables created by ReadFile inside CreateBuildCtx.
+//
 //go:embed Dockerfile
-var dockerfile embed.FS
+var dockerfileFS embed.FS
 
 //go:embed start.sh
-var shScript embed.FS
+var shScriptFS embed.FS
 
-// ContainerIDs the ids of the containers that are created
+// ContainerIDs holds the IDs of every agent container created in this run.
 var ContainerIDs []string
 
-// CreateBuildCtx - creates the Dockerfile and the start.sh script in a folder where migr8 is run
-// in order to create an accessible build context
+// CreateBuildCtx writes the embedded Dockerfile and start.sh into a local
+// directory so they can be used as a Docker build context.
 func CreateBuildCtx(path string) error {
 	color.Cyan("[INFO:] CREATING DOCKERFILE AND SHELL SCRIPT REQUIRED TO BUILD THE AGENT POOL IMAGE")
 
-	// make a new folder for the build context
-	mkDirErr := os.Mkdir(path, 0777)
-	if mkDirErr != nil {
-		return errors.New("[ERR:] => MKDIR => " + mkDirErr.Error())
+	if err := os.Mkdir(path, 0777); err != nil {
+		return errors.New("[ERR:] => MKDIR => " + err.Error())
 	}
 
-	// load embedded file contents
-	dockerfile, dockerfileErr := dockerfile.ReadFile("Dockerfile")
-	if dockerfileErr != nil {
-		return errors.New("[ERR:] => DOCKERFILE.READFILE => " + dockerfileErr.Error())
+	dockerfile, err := dockerfileFS.ReadFile("Dockerfile")
+	if err != nil {
+		return errors.New("[ERR:] => DOCKERFILE.READFILE => " + err.Error())
 	}
 
-	psScript, psErr := shScript.ReadFile("start.sh")
-	if psErr != nil {
-		return errors.New("[ERR:] => SHSCRIPT.READFILE => " + psErr.Error())
+	psScript, err := shScriptFS.ReadFile("start.sh")
+	if err != nil {
+		return errors.New("[ERR:] => SHSCRIPT.READFILE => " + err.Error())
 	}
 
-	// create new files with the embedded contents to bypass cli invocation restriction
-	dockerFileWriteErr := os.WriteFile(path+"/Dockerfile", dockerfile, os.ModePerm)
-	if dockerFileWriteErr != nil {
-		return errors.New("[ERR:] => DOCKERFILE.WRITEFILE => " + dockerFileWriteErr.Error())
+	if err := os.WriteFile(path+"/Dockerfile", dockerfile, os.ModePerm); err != nil {
+		return errors.New("[ERR:] => DOCKERFILE.WRITEFILE => " + err.Error())
 	}
-	psWriteErr := os.WriteFile(path+"/start.sh", psScript, os.ModePerm)
-	if psWriteErr != nil {
-		return errors.New("[ERR:] => SHSCRIPT.WRITEFILE => " + psWriteErr.Error())
+	if err := os.WriteFile(path+"/start.sh", psScript, os.ModePerm); err != nil {
+		return errors.New("[ERR:] => SHSCRIPT.WRITEFILE => " + err.Error())
 	}
 	return nil
 }
 
-// StartAgentPool - starts a new agent pool container
+// StartAgentPool creates, starts, and health-checks a single agent container.
 func StartAgentPool(details ConfigDetails) (string, error) {
-	// create the container
 	color.Cyan("[AGENT CONTAINER %s:] CREATING CONTAINER", details.ContainerName)
 
 	config := getAgentPoolConfig(details)
 
-	container, createErr := containers.CreateContainer(&config)
+	cont, createErr := containers.CreateContainer(&config)
 	if createErr != nil {
-		errorMsg := fmt.Sprintf("[AGENT CONTAINER %s:] FAILED TO CREATE AGENT CONTAINER => %s", details.ContainerName, createErr.Error())
-		return "", errors.New(errorMsg)
+		return "", fmt.Errorf("[AGENT CONTAINER %s:] FAILED TO CREATE AGENT CONTAINER => %s", details.ContainerName, createErr.Error())
 	}
-	ContainerIDs = append(ContainerIDs, container.ID)
+	ContainerIDs = append(ContainerIDs, cont.ID)
 	color.Green("[AGENT CONTAINER %s:] CONTAINER CREATED SUCCESSFULLY", details.ContainerName)
 
-	// start the container
 	color.Cyan("[AGENT CONTAINER %s:] STARTING CONTAINER", details.ContainerName)
-	startErr := containers.StartContainer(container)
-	if startErr != nil {
-		errorMsg := fmt.Sprintf("[AGENT CONTAINER %s:] FAILED TO START AGENT CONTAINER => %s", details.ContainerName, startErr.Error())
-		return "", errors.New(errorMsg)
+	if err := containers.StartContainer(cont); err != nil {
+		return "", fmt.Errorf("[AGENT CONTAINER %s:] FAILED TO START AGENT CONTAINER => %s", details.ContainerName, err.Error())
 	}
 
-	// container health check
-	color.Cyan("[AGENT CONTAINER %s:] CHECKING CONTAINER HEALTH", details.ContainerName)
-	isContainerHealthy := false
+	color.Cyan("[AGENT CONTAINER %s:] WAITING FOR AZURE PIPELINES AGENT TO COME ONLINE", details.ContainerName)
 	for {
-		isHealthy, err := isAgentPoolContainerHealthy(container.ID)
-		isContainerHealthy = isHealthy
-		if err == nil && !isHealthy {
-			color.Yellow("[AGENT CONTAINER %s:] WAITING ON CONTAINER HEALTH CHECK", details.ContainerName)
+		healthy, err := isAgentPoolContainerHealthy(cont.ID)
+		if err != nil {
+			return "", fmt.Errorf("[AGENT CONTAINER %s:] CONTAINER HEALTH CHECK FAILED => %s", details.ContainerName, err.Error())
 		}
-		if err != nil || isHealthy {
+		if healthy {
 			break
 		}
+		color.Yellow("[AGENT CONTAINER %s:] WAITING ON AGENT LISTENER — RETRYING IN 30s", details.ContainerName)
 		time.Sleep(30 * time.Second)
 	}
 
-	if isContainerHealthy {
-		color.Green("[AGENT CONTAINER %s:] AGENT CONTAINER STARTED SUCCESSFULLY", details.ContainerName)
-	}
-
-	if !isContainerHealthy {
-		errorMsg := fmt.Sprintf("[AGENT CONTAINER %s:] CONTAINER HEALTH STATUS FAILED", details.ContainerName)
-		return "", errors.New(errorMsg)
-	}
-
-	return container.ID, nil
+	color.Green("[AGENT CONTAINER %s:] AGENT CONTAINER STARTED SUCCESSFULLY", details.ContainerName)
+	return cont.ID, nil
 }
 
 func getAgentPoolConfig(details ConfigDetails) containers.ContainerCreateConfig {
-	newport, err := nat.NewPort("tcp", "80")
-	if err != nil {
-		fmt.Println("Unable to create docker port")
-	}
-
 	env := []string{
 		"AZP_URL=" + details.Org,
 		"AZP_TOKEN=" + details.Pat,
@@ -127,23 +103,22 @@ func getAgentPoolConfig(details ConfigDetails) containers.ContainerCreateConfig 
 		Config: &container.Config{
 			Image: "azp_agent",
 			Env:   env,
+			// Bug fix: the healthcheck now matches the actual readiness check used by
+			// isAgentPoolContainerHealthy. Previously it ran "dir" (always passes) which
+			// made Docker's health status meaningless.
 			Healthcheck: &container.HealthConfig{
-				Test:        []string{"CMD", "dir"},
-				Interval:    1 * time.Minute,
-				Timeout:     30 * time.Second,
-				StartPeriod: 15 * time.Second,
-				Retries:     1000,
+				Test:        []string{"CMD-SHELL", "ps aux | grep -q '[A]gent.Listener' || exit 1"},
+				Interval:    30 * time.Second,
+				Timeout:     10 * time.Second,
+				StartPeriod: 2 * time.Minute,
+				Retries:     10,
 			},
 		},
 		HostConfig: &container.HostConfig{
-			PortBindings: nat.PortMap{
-				newport: []nat.PortBinding{
-					{
-						HostIP:   "0.0.0.0",
-						HostPort: "80",
-					},
-				},
-			},
+			// Bug fix: removed PortBindings. All containers were binding to host port 80
+			// which caused containers 2..N to fail with "port already allocated" when
+			// deploying more than one app. Azure Pipelines agents use outbound connections
+			// to Azure DevOps — no host port binding is needed.
 			RestartPolicy: container.RestartPolicy{
 				Name: "no",
 			},
@@ -158,10 +133,9 @@ func getAgentPoolConfig(details ConfigDetails) containers.ContainerCreateConfig 
 }
 
 func isAgentPoolContainerHealthy(containerID string) (bool, error) {
-	cmd := []string{"ps", "aux"}
-	output, err := containers.Exec(containerID, cmd)
+	output, err := containers.Exec(containerID, []string{"ps", "aux"})
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(output, "Agent.Listener"), err
+	return strings.Contains(output, "Agent.Listener"), nil
 }

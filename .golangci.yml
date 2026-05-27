@@ -1,0 +1,21 @@
+linters:
+  enable:
+    - misspell
+    - unconvert
+    - whitespace
+    - nilerr
+    - bodyclose
+
+linters-settings:
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+
+run:
+  go: "1.21"
+  timeout: 5m
