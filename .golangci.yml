@@ -1,14 +1,17 @@
-linters:
-  enable:
-    - misspell
-    - unconvert
-    - whitespace
-    - nilerr
-    - bodyclose
+version: "2"
 
-linters-settings:
-  misspell:
-    locale: US
+linters:
+  # Start from the default set and add a few extras.
+  # Defaults: errcheck, gosimple, govet, ineffassign, staticcheck, unused
+  enable:
+    - misspell      # catches typos in comments and strings
+    - unconvert     # removes unnecessary type conversions
+    - whitespace    # detects leading/trailing blank lines in blocks
+    - nilerr        # finds code that returns nil when err is not nil
+    - bodyclose     # ensures HTTP response bodies are closed
+  settings:
+    misspell:
+      locale: US
 
 issues:
   exclude-rules:
