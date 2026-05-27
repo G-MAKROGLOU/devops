@@ -6,7 +6,7 @@ require (
 	github.com/G-MAKROGLOU/containers v0.0.0-20240713115820-784413a54d12
 	github.com/docker/docker v27.0.3+incompatible
 	github.com/fatih/color v1.19.0
-	github.com/opencontainers/image-spec v1.1.0
+	github.com/opencontainers/image-spec v1.1.1
 )
 
 require (
